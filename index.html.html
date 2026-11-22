@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rep Vision</title>
+<style>
+:root{--bg:#070d18;--sf:#0e1a30;--ln:#1e3a66;--tx:#d8ecff;--mu:#7f9cc2;--ac:#2fb4ff;--ok:#3de0a0;--bad:#ff6b7d;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at top,#0c2147,var(--bg) 60%) fixed;color:var(--tx);font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+main{max-width:640px;margin:0 auto;padding:14px 14px 40px}
+h1{margin:4px 0;font-size:26px;letter-spacing:.02em}h2{font-size:18px;margin:18px 0 6px}
+.mu{color:var(--mu)}.sm{font-size:14px}
+.vid{position:relative;background:#000;border:1px solid var(--ac);box-shadow:0 0 18px #2fb4ff44;border-radius:8px;overflow:hidden;min-height:180px}
+video,canvas{display:block;width:100%}canvas{position:absolute;inset:0;height:100%}
+.mir{transform:scaleX(-1)}
+#hud{position:absolute;left:12px;bottom:8px;text-shadow:0 2px 8px #000;pointer-events:none}
+#cnt{font:700 76px/1 system-ui}#goalshow{font-size:22px;color:var(--mu)}
+#state{position:absolute;right:12px;top:10px;background:#000a;padding:3px 10px;border-radius:99px;font-size:14px}
+#msg{min-height:26px;color:var(--bad);font-weight:600;margin:8px 0 0}
+.box{background:var(--sf);border:1px solid var(--ln);border-radius:6px;padding:12px;margin:10px 0}
+.row{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--ln)}.row:last-child{border:0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+button,select,input[type=number]{font:inherit;font-weight:600;padding:12px;border-radius:6px;border:1px solid var(--ln);background:var(--sf);color:var(--tx);width:100%}
+button.p{background:var(--ac);color:#031225;border:0}
+button:disabled,select:disabled,input:disabled{opacity:.45}
+label{display:flex;align-items:center;gap:8px}label input{width:auto}
+#card{font-size:22px;font-weight:700;color:var(--ac);min-height:30px}
+:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+.bar{height:8px;background:var(--ln);border-radius:4px;overflow:hidden;margin:6px 0}.bar i{display:block;height:100%;background:var(--ac)}.note{color:var(--ok);font-weight:600;min-height:22px;margin:4px 0}
+.gb{display:block;width:100%;text-align:left;margin-bottom:6px}
+</style></head><body>
+<main>
+<h1>Rep Vision</h1>
+<p class="mu sm">Your camera counts reps and holds. Nothing leaves your device: the video is processed in the browser.</p>
+<div class="box" id="sys"></div>
+<div class="vid"><video id="v" playsinline muted></video><canvas id="c"></canvas>
+<div id="state">Camera off</div>
+<div id="hud"><div id="cnt">0</div><div id="goalshow"></div></div></div>
+<div id="msg" role="status"></div>
+<div id="note" class="note" role="status"></div>
+<div class="box">
+ <div id="card"></div>
+ <div class="grid">
+  <select id="ex" aria-label="Exercise"></select>
+  <input id="goal" type="number" min="0" placeholder="Goal (reps or seconds)" aria-label="Goal">
+ </div>
+ <p id="tip" class="mu sm"></p>
+ <div class="grid">
+  <button class="p" id="go">Start camera</button><button id="flip">Flip camera</button>
+  <button id="new">New set</button><button id="fin">Finish set</button>
+  <button id="plus">Manual +1</button><button id="skip">Skip card</button>
+ </div>
+ <div class="grid">
+  <label><input type="checkbox" id="deck"> Deck mode</label>
+  <label><input type="checkbox" id="voice"> Voice count</label>
+ </div>
+ <p class="mu sm">Live angle: <b id="ang">-</b>. If counting feels too strict or loose, edit the lo and hi angles for that exercise in the EX list at the top of the script.</p>
+</div>
+<div id="hist"></div>
+<div id="gates"></div>
+<div class="grid"><button id="exp">Export history</button><button id="clr">Clear history</button></div>
+<p class="mu sm">The camera needs https or localhost. Opening this file straight from your disk works in most desktop browsers. On a phone, host the file on https, for example GitHub Pages or Netlify.</p>
+</main>
+<script type="module">
+import {PoseLandmarker,FilesetResolver,DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const $=id=>document.getElementById(id),v=$("v"),c=$("c");
+
+/* ---- config: edit these ---- */
+const SUITS=["pushup","squat","situp","pullup"],SY=["♠","♥","♦","♣"];
+const EX={
+ pushup:{n:"Push-ups",j:["shoulder","elbow","wrist"],lo:90,hi:155,tip:"Put the camera at your side, about 2 m away, whole body in frame."},
+ squat:{n:"Squats",j:["hip","knee","ankle"],lo:100,hi:160,tip:"Stand sideways to the camera, whole body in frame."},
+ situp:{n:"Sit-ups",j:["shoulder","hip","knee"],lo:75,hi:125,tip:"Camera at your side, knees bent."},
+ pullup:{n:"Pull-ups",j:["shoulder","elbow","wrist"],lo:80,hi:150,tip:"Camera at your side with the whole bar and your body in frame."},
+ handstand:{n:"Handstand hold",hold:1,tip:"Camera at your side, whole body in frame. The timer runs while you are upside down."},
+ plank:{n:"Plank hold",hold:1,tip:"Camera at your side, whole body in frame. The timer runs while your body is in one line."}
+};
+const IDX={shoulder:[11,12],elbow:[13,14],wrist:[15,16],hip:[23,24],knee:[25,26],ankle:[27,28]};
+const RK=n=>({1:"A",11:"J",12:"Q",13:"K"}[n]||n);
+
+/* ---- state ---- */
+let pl,du,run=false,looping=false,stream=null,facing="user",ex="pushup",goal=0,reps=0,holdMs=0,lastOk=0,lastTick=0;
+let tFlex=0,side=null,conf=0,miss=0,armAt=0,st="wait",A=null,tLeave=0,durs=[],flags=0,bad=false,done=false,deckOn=false,deck=[],lastT=-1,W="",WT=0;
+let hist=[];try{hist=JSON.parse(localStorage.getItem("rv1")||"[]")}catch(e){}
+const persist=()=>{try{localStorage.setItem("rv1",JSON.stringify(hist))}catch(e){}};
+const warn=t=>{W=t;WT=performance.now()};
+
+/* ---- helpers ---- */
+const ang=(a,b,k)=>{const r=Math.atan2(k.y-b.y,k.x-b.x)-Math.atan2(a.y-b.y,a.x-b.x);const d=Math.abs(r*180/Math.PI);return d>180?360-d:d};
+const beep=(f=660,d=.12)=>{try{const a=new(window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.frequency.value=f;o.connect(a.destination);o.start();o.stop(a.currentTime+d)}catch(e){}};
+const say=t=>{try{if($("voice").checked){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(String(t)))}}catch(e){}};
+
+/* ---- ui ---- */
+$("ex").innerHTML=Object.keys(EX).map(k=>`<option value="${k}">${EX[k].n}</option>`).join("");
+function ui(){
+ const e=EX[ex];
+ $("cnt").textContent=e.hold?Math.floor(holdMs/1e3):reps;
+ $("goalshow").textContent=goal?"of "+goal+(e.hold?" s":""):"";
+ $("tip").textContent=e.tip;
+ if(run)$("state").textContent=done?"Set complete":e.hold?"Holding":st==="wait"?"Get in position":st==="flex"?"Push back up":"Go";
+}
+function renderHist(){
+ const t=new Date().toDateString(),td={};
+ hist.filter(h=>new Date(h.d).toDateString()===t&&EX[h.ex]).forEach(h=>td[h.ex]=(td[h.ex]||0)+h.v);
+ $("hist").innerHTML=`<h2>Today</h2><div class="box">${Object.keys(td).map(k=>`<div class="row"><span>${EX[k].n}</span><b>${td[k]}${EX[k].hold?" s":" reps"}</b></div>`).join("")||'<span class="mu">No sets yet.</span>'}</div>
+ <h2>Recent sets</h2><div class="box">${hist.filter(h=>EX[h.ex]).slice(-8).reverse().map(h=>`<div class="row"><span>${EX[h.ex].n}</span><span>${h.v}${h.hold?" s":" reps"}${h.tempo?" · "+h.tempo+" s/rep":""}${h.flags?" · "+h.flags+" form flags":""}</span></div>`).join("")||'<span class="mu">Nothing yet.</span>'}</div>`;
+}
+function resetSet(){side=null;conf=0;armAt=performance.now()+5000;reps=0;holdMs=0;st="wait";A=null;tLeave=0;durs=[];flags=0;bad=false;done=false;lastTick=0;lastOk=0;ui()}
+function drawCard(){
+ if(!deck.length){deck=[...Array(52).keys()];for(let i=51;i>0;i--){const j=Math.floor(Math.random()*(i+1));[deck[i],deck[j]]=[deck[j],deck[i]]}}
+ const k=deck.pop(),s=k%4,val=Math.floor(k/4)+1;
+ ex=SUITS[s];goal=val;$("ex").value=ex;$("goal").value=val;
+ $("card").textContent=SY[s]+" "+RK(val)+": do "+val+" "+EX[ex].n;
+ resetSet();say(val+" "+EX[ex].n);
+}
+function finish(){
+ if(done)return;done=true;
+ const e=EX[ex],val=e.hold?Math.round(holdMs/1e3):reps;
+ if(val>0){hist.push({d:new Date().toISOString(),ex,v:val,goal,hold:!!e.hold,tempo:durs.length?Math.round(durs.reduce((a,b)=>a+b,0)/durs.length/100)/10:0,flags});persist()}
+ if(val>0){let m="";const L0=lv().l;addXp(val+(deckOn?10:0));
+  GATES.forEach((g,i)=>{const st=gs(i);if(open(g)&&!st.done){const q=g[3][st.s].split("|");if(q[3]===ex)m+=glog(i,val)}});
+  if(lv().l>L0)m+="LEVEL UP: level "+lv().l+", rank "+rk(lv().l)+". ";
+  $("note").textContent=m||"+"+val+" XP.";renderSys();renderGates()}
+ beep(880,.3);say("Set complete");renderHist();ui();
+ if(deckOn)setTimeout(()=>{if(deckOn&&done)drawCard()},4000);
+}
+function rep(now){
+ const d=tLeave?now-tLeave:(now-tFlex)*2;tLeave=0;if(d<350){warn("Too fast to count ("+Math.round(d)+" ms). Move at a steady pace.");return}durs.push(d);reps++;beep();say(reps);
+ if(d<900)warn("Slow down. Control the movement.");
+ if(bad){flags++;bad=false}
+ ui();if(goal&&reps>=goal)finish();
+}
+
+/* ---- pose logic ---- */
+function update(lm){
+ const Wd=v.videoWidth,H=v.videoHeight,e=EX[ex],now=performance.now();
+ if(now<armAt){warn("Get in position: "+Math.ceil((armAt-now)/1e3));return}
+ const vis=s=>Object.values(IDX).reduce((a,k)=>a+lm[k[s]].visibility,0);if(side===null||st==="wait")side=vis(0)>=vis(1)?0:1;const s=side;
+ const pt=n=>({x:lm[IDX[n][s]].x*Wd,y:lm[IDX[n][s]].y*H});
+ const line=ang(pt("shoulder"),pt("hip"),pt("ankle"));
+ if(e.hold){
+  const sh=pt("shoulder"),hp=pt("hip"),an=pt("ankle"),wr=pt("wrist");let ok;
+  if(ex==="handstand"){ok=an.y<hp.y&&hp.y<sh.y&&sh.y<wr.y;if(ok&&line<160)warn("Stack your hips over your shoulders")}
+  else{ok=line>160&&Math.abs(sh.y-an.y)<.45*Math.abs(sh.x-an.x);if(!ok&&line<160)warn("Keep your hips in line")}
+  if(ok)lastOk=now;
+  if(lastTick&&now-lastOk<700)holdMs+=now-lastTick;
+  lastTick=now;ui();
+  if(goal&&holdMs/1e3>=goal)finish();
+  return;
+ }
+ if(e.j.some(n=>lm[IDX[n][s]].visibility<.6)){warn("A joint is hidden. Adjust the camera so your whole side is visible.");return}
+ const a=ang(pt(e.j[0]),pt(e.j[1]),pt(e.j[2]));
+ if(A!=null&&Math.abs(a-A)>50){A=A*.8+a*.2;return}
+ A=A==null?a:A*.7+a*.3;
+ $("ang").textContent=Math.round(A)+"°";
+ const go=c2=>{if(!c2){conf=0;return false}if(!conf)conf=now;return now-conf>=120};
+ if(st==="wait"){if(go(A>=e.hi)){st="ext";conf=0;ui()}else if(A<e.hi)warn("Get into the starting position")}
+ else if(st==="ext"){
+  if(A>=e.hi)tLeave=0;else if(A<e.hi-10&&!tLeave)tLeave=now;
+  if(go(A<=e.lo)){st="flex";conf=0;tFlex=now;ui()}
+ }else if(st==="flex"){
+  if(ex==="pushup"&&line<150){warn("Keep your body in one line");bad=true}
+  if(go(A>=e.hi)){st="ext";conf=0;rep(now)}
+ }
+}
+function loop(){
+ if(!run){looping=false;return}
+ looping=true;
+ if(v.readyState>=2&&v.currentTime!==lastT){
+  lastT=v.currentTime;
+  const r=pl.detectForVideo(v,performance.now()),g=c.getContext("2d"),lm=r.landmarks&&r.landmarks[0];
+  g.clearRect(0,0,c.width,c.height);
+  if(lm){miss=0;du.drawConnectors(lm,PoseLandmarker.POSE_CONNECTIONS,{color:"#2fb4ff",lineWidth:3});du.drawLandmarks(lm,{color:"#fff",radius:3});if(!done)update(lm)}
+  else{warn("I cannot see you. Step back so your whole body is in frame.");if(++miss>20){st="wait";A=null;tLeave=0;conf=0}}
+ }
+ $("msg").textContent=performance.now()-WT<1500?W:"";
+ requestAnimationFrame(loop);
+}
+
+/* ---- camera ---- */
+async function start(){
+ $("go").disabled=true;$("msg").textContent="Loading the pose model. This takes a few seconds the first time.";
+ try{
+  if(!pl){
+   const f=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+   const opt=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate:d},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.6,minPosePresenceConfidence:.6,minTrackingConfidence:.6});
+   try{pl=await PoseLandmarker.createFromOptions(f,opt("GPU"))}catch(err){pl=await PoseLandmarker.createFromOptions(f,opt("CPU"))}
+  }
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:960},height:{ideal:720}},audio:false});
+  v.srcObject=stream;await v.play();
+  c.width=v.videoWidth;c.height=v.videoHeight;du=new DrawingUtils(c.getContext("2d"));
+  v.classList.toggle("mir",facing==="user");c.classList.toggle("mir",facing==="user");
+  run=true;$("msg").textContent="";$("go").textContent="Restart camera";resetSet();
+  try{navigator.wakeLock&&navigator.wakeLock.request("screen").catch(()=>{})}catch(err){}
+  if(!looping)requestAnimationFrame(loop);
+ }catch(e){
+  $("msg").textContent=e&&e.name==="NotAllowedError"?"Camera blocked. Allow camera access in your browser settings and try again.":e&&e.name==="NotFoundError"?"No camera found on this device.":"Could not start: "+(e&&e.message||e)+" The camera needs https or localhost, and the pose model needs an internet connection.";
+ }
+ $("go").disabled=false;
+}
+
+/* ---- the system: levels, ranks, gates, bosses ---- */
+let P={xp:0,g:{},focus:-1};try{Object.assign(P,JSON.parse(localStorage.getItem("rv2")||"{}"))}catch(e){}
+const saveP=()=>{try{localStorage.setItem("rv2",JSON.stringify(P))}catch(e){}};
+const day=()=>new Date(Date.now()-new Date().getTimezoneOffset()*6e4).toISOString().slice(0,10);
+const need={E:1,D:5,C:10,B:20,A:30,S:40};
+// name, rank, boss, steps "name|goal|s or r|camera exercise (optional)"
+const GATES=[
+["Pull-up","E","Warden of the Bar",["Dead hang|30|s","Scapular pull-up|10|r","Negative pull-up|5|r","Pull-up|10|r|pullup"]],
+["L-sit","E","Goblin of the Floor",["Tuck sit|20|s","One-leg L-sit|15|s","L-sit|20|s"]],
+["Handstand","D","Knight of Inversion",["Wall plank|30|s","Chest-to-wall handstand|30|s|handstand","Kick-up hold|10|s|handstand","Freestanding handstand|30|s|handstand"]],
+["Pistol squat","D","Hobgoblin of Balance",["Deep squat hold|30|s","Assisted pistol|8|r","Box pistol|8|r","Pistol squat|5|r"]],
+["One-arm push-up","C","Orc Lord of the Single Hand",["Diamond push-up|15|r","Archer push-up|8|r","Assisted one-arm push-up|5|r","One-arm push-up|3|r"]],
+["Dragon flag","C","Dragon Warden",["Hanging knee raise|15|r","Tuck dragon hold|15|s","Single-leg dragon hold|10|s","Dragon flag hold|10|s"]],
+["Muscle-up","C","Iron Golem",["Pull-up|12|r|pullup","Chest-to-bar pull-up|6|r","Negative muscle-up|5|r","Muscle-up|3|r"]],
+["Front lever","B","Frost Giant",["Tuck front lever|15|s","Advanced tuck lever|10|s","Straddle front lever|5|s","Front lever|3|s"]],
+["Planche","B","Phantom Knight",["Planche lean|30|s","Tuck planche|15|s","Advanced tuck planche|10|s","Straddle planche|5|s","Full planche|3|s"]],
+["Human flag","A","Tyrant of the Pole",["Side plank|45|s","Clutch flag|10|s","Tuck human flag|8|s","Straddle human flag|5|s","Human flag|3|s"]],
+["One-arm pull-up","A","Beast of the Single Grip",["Archer pull-up|6|r","Typewriter pull-up|5|r","Assisted one-arm pull-up|3|r","One-arm pull-up|1|r"]],
+["Planche push-up","S","Monarch of Gravity",["Tuck planche push-up|5|r","Straddle planche push-up|3|r","Full planche push-up|1|r"]],
+["One-arm handstand","S","Dragon Emperor",["Freestanding handstand|60|s|handstand","Weight-shift handstand|10|r","Finger-assisted one-arm handstand|5|s","One-arm handstand|5|s"]]];
+function lv(){let x=P.xp,l=1;while(x>=l*200){x-=l*200;l++}return{l,x,n:l*200}}
+const rk=l=>l<5?"E":l<10?"D":l<20?"C":l<30?"B":l<40?"A":"S";
+const open=g=>lv().l>=need[g[1]];
+const gs=i=>(P.g[i]=P.g[i]||{s:0,b:0,d:""});
+const addXp=n=>{P.xp+=n;saveP()};
+function glog(i,v){
+ const g=GATES[i],st=gs(i);if(!(v>0)||st.done||!open(g))return"";
+ const p=g[3][st.s].split("|");let xp=0,m="";
+ st.b=Math.max(st.b,v);
+ if(st.d!==day()){st.d=day();xp+=20}
+ if(v>=+p[1]){xp+=40*(st.s+1);m="Step cleared: "+p[0]+". ";
+  if(st.s>=g[3].length-1){st.done=1;xp+=200*("EDCBAS".indexOf(g[1])+1);m="Boss defeated: "+g[2]+". "+g[0]+" is yours. "}
+  else{st.s++;st.b=0}}
+ addXp(xp);return m+(xp?"+"+xp+" XP. ":"");
+}
+function renderSys(){const v=lv();$("sys").innerHTML=`<div class="row" style="border:0"><b style="font-size:24px">Lv. ${v.l}</b><b style="color:var(--ac)">Rank ${rk(v.l)}</b></div><div class="bar"><i style="width:${v.x/v.n*100}%"></i></div><div class="mu sm">XP ${v.x} / ${v.n}. Every rep and every second of a hold earns XP.</div>`}
+let sel=-1;
+function renderGates(){
+ if(sel>=0){
+  const g=GATES[sel],st=gs(sel),p=g[3][st.s].split("|"),un=p[2]==="s"?"sec":"reps";
+  $("gates").innerHTML=`<h2>Gates</h2><button data-a="back">Back to gates</button><div class="box"><b>${g[0]}</b> · Rank ${g[1]}<div class="mu sm">Boss: ${g[2]}</div>${g[3].map((x,k)=>{const q=x.split("|");return`<div class="row"><span>${k<st.s||st.done?"✓":k===st.s?"▶":"🔒"} ${q[0]}${k===g[3].length-1?" (boss)":""}</span><span class="mu">${q[1]} ${q[2]}${q[3]?" · camera":""}</span></div>`}).join("")}</div>`+
+  (st.done?'<div class="box">Boss defeated. You own this skill.</div>':`<div class="box"><b>Current: ${p[0]}</b><div class="mu sm">Goal ${p[1]} ${un}. Best ${st.b}.</div><div class="bar"><i style="width:${Math.min(100,st.b/p[1]*100)}%"></i></div>${p[3]?'<button class="p" data-a="train">Train with the camera</button>':`<input id="gv" type="number" min="0" placeholder="Your best ${un}"><button class="p" data-a="log">Log attempt</button>`}<button data-a="focus">${P.focus===sel?"This is your focus gate":"Make this my focus gate"}</button></div>`);
+  return;
+ }
+ $("gates").innerHTML="<h2>Gates</h2>"+"EDCBAS".split("").map(r=>GATES.map((g,i)=>g[1]===r?`<button class="gb" data-a="open" data-i="${i}" ${open(g)?"":"disabled"}><b>${g[0]}</b> <span class="mu">Rank ${r} · ${gs(i).done?"Cleared":open(g)?"Step "+(gs(i).s+1)+"/"+g[3].length:"unlocks at Lv. "+need[r]}</span></button>`:"").join("")).join("");
+}
+$("gates").onclick=e=>{
+ const b=e.target.closest("button");if(!b||b.disabled)return;const a=b.dataset.a;
+ if(a==="open"){sel=+b.dataset.i}
+ else if(a==="back"){sel=-1}
+ else if(a==="focus"){P.focus=sel;saveP()}
+ else if(a==="log"){$("note").textContent=glog(sel,+$("gv").value)||"Nothing logged.";renderSys()}
+ else if(a==="train"){
+  const p=GATES[sel][3][gs(sel).s].split("|");
+  $("deck").checked=false;deckOn=false;$("card").textContent="";$("ex").disabled=$("goal").disabled=false;
+  ex=p[3];$("ex").value=ex;goal=+p[1];$("goal").value=goal;resetSet();
+  $("note").textContent="Camera is set for "+p[0]+". Start your set.";window.scrollTo(0,0);
+ }
+ renderGates();
+};
+
+/* ---- controls ---- */
+$("go").onclick=start;
+$("flip").onclick=()=>{facing=facing==="user"?"environment":"user";if(run)start()};
+$("new").onclick=()=>{deckOn?drawCard():resetSet()};
+$("fin").onclick=finish;
+$("plus").onclick=()=>{if(!done&&!EX[ex].hold){reps++;beep();say(reps);ui();if(goal&&reps>=goal)finish()}};
+$("skip").onclick=()=>{if(deckOn)drawCard()};
+$("ex").onchange=()=>{ex=$("ex").value;resetSet()};
+$("goal").oninput=()=>{goal=+$("goal").value||0;ui()};
+$("deck").onchange=()=>{deckOn=$("deck").checked;$("ex").disabled=$("goal").disabled=deckOn;if(deckOn)drawCard();else $("card").textContent=""};
+$("exp").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify({hist,player:P},null,1)],{type:"application/json"}));a.download="rep-vision-history.json";a.click()};
+renderSys();renderGates();
+let wipe=false;$("clr").onclick=function(){if(wipe){hist=[];persist();wipe=false;this.textContent="Clear history";renderHist()}else{wipe=true;this.textContent="Tap again to erase"}};
+renderHist();ui();
+</script></body></html>
